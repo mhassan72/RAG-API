@@ -22,7 +22,20 @@ A high-performance semantic search microservice built with Rust, providing sub-1
 
 ## Getting Started
 
-This project follows a spec-driven development approach. See the implementation plan in `.kiro/specs/rag-search-api/tasks.md` for detailed development tasks.
+```bash
+# Clone the repository
+git clone <repository-url>
+cd rag-search-api
+
+# Build the project
+cargo build
+
+# Run tests
+cargo test
+
+# Start the server
+cargo run
+```
 
 ## Architecture
 

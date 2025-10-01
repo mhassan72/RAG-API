@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 /// Core search request structure
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchRequest {
     /// Natural language query
     pub query: String,
@@ -18,7 +18,7 @@ pub struct SearchRequest {
 }
 
 /// Search filters for metadata-based filtering
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchFilters {
     /// Filter by language (e.g., "en", "es")
     pub language: Option<String>,
@@ -27,7 +27,7 @@ pub struct SearchFilters {
 }
 
 /// Search response structure
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResponse {
     /// Unique post identifier
     pub post_id: String,
@@ -129,30 +129,7 @@ pub enum SearchMode {
     Degraded,
 }
 
-impl SearchRequest {
-    /// Validate search request parameters
-    pub fn validate(&self) -> Result<(), String> {
-        if self.query.is_empty() {
-            return Err("Query cannot be empty".to_string());
-        }
-        
-        if self.query.len() > 1000 {
-            return Err("Query too long (max 1000 characters)".to_string());
-        }
-        
-        if self.k == 0 || self.k > 50 {
-            return Err("k must be between 1 and 50".to_string());
-        }
-        
-        if let Some(score) = self.min_score {
-            if score < 0.0 || score > 1.0 {
-                return Err("min_score must be between 0.0 and 1.0".to_string());
-            }
-        }
-        
-        Ok(())
-    }
-}
+
 
 impl Post {
     /// Convert to search response with truncated snippet
