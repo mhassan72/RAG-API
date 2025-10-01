@@ -4,7 +4,9 @@ pub mod search;
 pub mod cache;
 pub mod error;
 pub mod types;
+pub mod config;
 
 pub use error::{SearchError, SearchResult};
 pub use types::*;
 pub use server::SearchServer;
+pub use config::Config;

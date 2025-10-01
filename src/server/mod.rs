@@ -14,15 +14,19 @@ use tracing::{info, error, warn};
 
 use crate::error::{SearchError, SearchResult};
 use crate::types::{SearchRequest, SearchResponse};
+use crate::config::Config;
 
 /// Main search server structure
 pub struct SearchServer {
     app: Router,
+    config: Config,
 }
 
 /// Shared application state
 #[derive(Clone)]
 pub struct AppState {
+    /// Application configuration
+    pub config: Config,
     /// Rate limiter for tracking requests per IP
     rate_limiter: Arc<RateLimiter>,
     // TODO: Add ML service, cache manager, etc. in future tasks
@@ -37,7 +41,7 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
-    pub fn new() -> Self {
+    pub fn new(_rate_limit_per_minute: u64) -> Self {
         Self {
             request_count: AtomicU64::new(0),
             last_reset: std::sync::Mutex::new(Instant::now()),
@@ -45,8 +49,7 @@ impl RateLimiter {
     }
 
     /// Check if request should be rate limited
-    /// Simplified implementation: 100 requests per minute globally
-    pub fn check_rate_limit(&self) -> bool {
+    pub fn check_rate_limit(&self, rate_limit_per_minute: u64) -> bool {
         let mut last_reset = self.last_reset.lock().unwrap();
         let now = Instant::now();
         
@@ -57,15 +60,16 @@ impl RateLimiter {
         }
         
         let current_count = self.request_count.fetch_add(1, Ordering::Relaxed);
-        current_count < 100 // Allow up to 100 requests per minute
+        current_count < rate_limit_per_minute
     }
 }
 
 impl SearchServer {
     /// Create a new search server instance
-    pub async fn new() -> SearchResult<Self> {
+    pub async fn new(config: Config) -> SearchResult<Self> {
         let state = Arc::new(AppState {
-            rate_limiter: Arc::new(RateLimiter::new()),
+            rate_limiter: Arc::new(RateLimiter::new(config.server.rate_limit_per_minute)),
+            config: config.clone(),
         });
 
         let app = Router::new()
@@ -74,16 +78,17 @@ impl SearchServer {
             .layer(middleware::from_fn_with_state(state.clone(), request_middleware))
             .with_state(state);
 
-        Ok(SearchServer { app })
+        Ok(SearchServer { app, config })
     }
 
     /// Run the server
     pub async fn run(self) -> SearchResult<()> {
-        let listener = TcpListener::bind("0.0.0.0:8080")
+        let bind_addr = format!("{}:{}", self.config.server.host, self.config.server.port);
+        let listener = TcpListener::bind(&bind_addr)
             .await
-            .map_err(|e| SearchError::ConfigError(format!("Failed to bind to port 8080: {}", e)))?;
+            .map_err(|e| SearchError::ConfigError(format!("Failed to bind to {}: {}", bind_addr, e)))?;
 
-        info!("Server listening on 0.0.0.0:8080");
+        info!("Server listening on {}", bind_addr);
 
         axum::serve(listener, self.app)
             .await
@@ -100,7 +105,7 @@ async fn request_middleware(
     next: Next,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // Check rate limit
-    if !state.rate_limiter.check_rate_limit() {
+    if !state.rate_limiter.check_rate_limit(state.config.server.rate_limit_per_minute) {
         warn!("Rate limit exceeded");
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
@@ -112,7 +117,7 @@ async fn request_middleware(
     }
 
     // Apply timeout to request processing
-    match timeout(Duration::from_millis(500), next.run(request)).await {
+    match timeout(Duration::from_millis(state.config.server.request_timeout_ms), next.run(request)).await {
         Ok(response) => Ok(response),
         Err(_) => {
             error!("Request timeout");
@@ -151,12 +156,12 @@ async fn semantic_search_handler(
     if let Some(content_length) = headers.get("content-length") {
         if let Ok(length_str) = content_length.to_str() {
             if let Ok(length) = length_str.parse::<usize>() {
-                if length > 32 * 1024 { // 32KB limit
+                if length > _state.config.server.max_request_size {
                     return Err((
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse {
                             error: "Request too large".to_string(),
-                            message: "Request body must be less than 32KB".to_string(),
+                            message: format!("Request body must be less than {} bytes", _state.config.server.max_request_size),
                         }),
                     ));
                 }
@@ -269,7 +274,8 @@ mod tests {
 
     /// Helper function to create a test server
     async fn create_test_server() -> TestServer {
-        let server = SearchServer::new().await.unwrap();
+        let config = Config::default();
+        let server = SearchServer::new(config).await.unwrap();
         TestServer::new(server.app).unwrap()
     }
 
@@ -518,7 +524,7 @@ mod tests {
         
         if response.status_code() == StatusCode::BAD_REQUEST {
             let error: ErrorResponse = response.json();
-            assert!(error.message.contains("less than 32KB") || error.message.contains("too large"));
+            assert!(error.message.contains("bytes") || error.message.contains("too large"));
         } else {
             // If the framework doesn't enforce content-length, we'll skip this specific test
             // but the validation logic is still there for real requests
@@ -528,15 +534,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limiter_functionality() {
-        let rate_limiter = RateLimiter::new();
+        let rate_limiter = RateLimiter::new(100);
         
         // Should allow first 100 requests
         for _ in 0..100 {
-            assert!(rate_limiter.check_rate_limit());
+            assert!(rate_limiter.check_rate_limit(100));
         }
         
         // Should deny 101st request
-        assert!(!rate_limiter.check_rate_limit());
+        assert!(!rate_limiter.check_rate_limit(100));
     }
 
     #[tokio::test]
