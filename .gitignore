@@ -21,5 +21,11 @@ Thumbs.db
 # Models (will be downloaded at runtime)
 models/
 
-# Kiro IDE configuration (keep local only)
+# IDE configuration (keep local only)
 .kiro/
+.vscode
+
+
+
+# Git
+.gitignore
