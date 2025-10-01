@@ -21,6 +21,9 @@ Thumbs.db
 # Models (will be downloaded at runtime)
 models/
 
+# Kiro IDE configuration (keep local only)
+.kiro/
+
 # To use this template:
 # 1. Copy this file to .gitignore
 # 2. Customize as needed for your project
