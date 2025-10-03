@@ -1,6 +1,27 @@
 use rag_search_api::{CacheManager, Config, SearchResult};
 use std::env;
 
+/// Sanitize URL for logging by masking credentials
+fn sanitize_url_for_logging(url: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(url) {
+        let mut sanitized = parsed.clone();
+        if parsed.password().is_some() {
+            let _ = sanitized.set_password(Some("***"));
+        }
+        if !parsed.username().is_empty() {
+            let _ = sanitized.set_username("***");
+        }
+        sanitized.to_string()
+    } else {
+        // If URL parsing fails, just mask the entire thing after the protocol
+        if let Some(pos) = url.find("://") {
+            format!("{}://***", &url[..pos])
+        } else {
+            "***".to_string()
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> SearchResult<()> {
     // Initialize logging
@@ -12,7 +33,7 @@ async fn main() -> SearchResult<()> {
     // Load configuration from environment
     let config = Config::from_env()?;
     
-    println!("Connecting to Redis at: {}", config.redis.url);
+    println!("Connecting to Redis at: {}", sanitize_url_for_logging(&config.redis.url));
     
     // Create cache manager
     let cache_manager = match CacheManager::new(config.redis).await {

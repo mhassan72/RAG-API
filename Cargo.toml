@@ -32,9 +32,17 @@ thiserror = "1.0"
 anyhow = "1.0"
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json"] }
-# Metrics
+# Metrics and observability
 prometheus = "0.13"
+# OpenTelemetry tracing
+opentelemetry = "0.21"
+opentelemetry_sdk = { version = "0.21", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.14", features = ["tonic"] }
+tracing-opentelemetry = "0.22"
+# Additional tracing features
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+# Metrics middleware for axum
+axum-prometheus = "0.6"
 # Hashing for cache keys
 farmhash = "1.1"
 # Tokenization
@@ -53,6 +61,10 @@ tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 # Random number generation for jitter
 rand = "0.8"
+# URL parsing for sanitizing logs
+url = "2.5"
+# Regular expressions for log sanitization
+regex = "1.10"
 
 [build-dependencies]
 tonic-build = "0.11"

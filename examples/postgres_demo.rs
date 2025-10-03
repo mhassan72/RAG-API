@@ -3,6 +3,27 @@ use chrono::Utc;
 use std::env;
 use uuid::Uuid;
 
+/// Sanitize URL for logging by masking credentials
+fn sanitize_url_for_logging(url: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(url) {
+        let mut sanitized = parsed.clone();
+        if parsed.password().is_some() {
+            let _ = sanitized.set_password(Some("***"));
+        }
+        if !parsed.username().is_empty() {
+            let _ = sanitized.set_username("***");
+        }
+        sanitized.to_string()
+    } else {
+        // If URL parsing fails, just mask the entire thing after the protocol
+        if let Some(pos) = url.find("://") {
+            format!("{}://***", &url[..pos])
+        } else {
+            "***".to_string()
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> SearchResult<()> {
     // Initialize logging
@@ -14,7 +35,7 @@ async fn main() -> SearchResult<()> {
     // Load configuration from environment
     let config = Config::from_env()?;
     
-    println!("Connecting to Postgres at: {}", config.database.supabase_url);
+    println!("Connecting to Postgres at: {}", sanitize_url_for_logging(&config.database.supabase_url));
     
     // Create database manager
     let db_manager = match DatabaseManager::new(config.database).await {

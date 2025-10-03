@@ -62,7 +62,7 @@ impl CacheStatsInternal {
 impl RedisClient {
     /// Create a new Redis client with TLS and cluster support
     pub async fn new(config: RedisConfig) -> SearchResult<Self> {
-        info!("Initializing Redis client with URL: {}", &config.url);
+        info!("Initializing Redis client with URL: {}", sanitize_url_for_logging(&config.url));
 
         // Parse Redis URL to determine if TLS is needed
         let _use_tls = config.url.starts_with("rediss://");
@@ -493,6 +493,27 @@ impl CacheStats {
             0.0
         } else {
             total_hits as f64 / total as f64
+        }
+    }
+}
+
+/// Sanitize URL for logging by masking credentials
+fn sanitize_url_for_logging(url: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(url) {
+        let mut sanitized = parsed.clone();
+        if parsed.password().is_some() {
+            let _ = sanitized.set_password(Some("***"));
+        }
+        if !parsed.username().is_empty() {
+            let _ = sanitized.set_username("***");
+        }
+        sanitized.to_string()
+    } else {
+        // If URL parsing fails, just mask the entire thing after the protocol
+        if let Some(pos) = url.find("://") {
+            format!("{}://***", &url[..pos])
+        } else {
+            "***".to_string()
         }
     }
 }

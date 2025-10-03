@@ -18,7 +18,7 @@ pub struct PostgresClient {
 impl PostgresClient {
     /// Create a new Postgres client with connection pooling
     pub async fn new(config: DatabaseConfig) -> SearchResult<Self> {
-        info!("Initializing Postgres client with URL: {}", &config.supabase_url);
+        info!("Initializing Postgres client with URL: {}", sanitize_url_for_logging(&config.supabase_url));
 
         // Create deadpool configuration
         let mut pg_config = Config::new();
@@ -508,6 +508,27 @@ pub struct PostgresStats {
     pub database_size_bytes: u64,
     pub active_connections: u32,
     pub max_connections: u32,
+}
+
+/// Sanitize URL for logging by masking credentials
+fn sanitize_url_for_logging(url: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(url) {
+        let mut sanitized = parsed.clone();
+        if parsed.password().is_some() {
+            let _ = sanitized.set_password(Some("***"));
+        }
+        if !parsed.username().is_empty() {
+            let _ = sanitized.set_username("***");
+        }
+        sanitized.to_string()
+    } else {
+        // If URL parsing fails, just mask the entire thing after the protocol
+        if let Some(pos) = url.find("://") {
+            format!("{}://***", &url[..pos])
+        } else {
+            "***".to_string()
+        }
+    }
 }
 
 #[cfg(test)]

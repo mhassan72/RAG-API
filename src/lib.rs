@@ -6,6 +6,7 @@ pub mod database;
 pub mod error;
 pub mod types;
 pub mod config;
+pub mod observability;
 
 pub use error::{SearchError, SearchResult};
 pub use types::*;
