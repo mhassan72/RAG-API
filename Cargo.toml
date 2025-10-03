@@ -65,6 +65,8 @@ rand = "0.8"
 url = "2.5"
 # Regular expressions for log sanitization
 regex = "1.10"
+# HTTP middleware for CORS and security headers
+tower-http = { version = "0.5", features = ["cors", "limit", "set-header"] }
 
 [build-dependencies]
 tonic-build = "0.11"
