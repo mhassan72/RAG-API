@@ -3,20 +3,38 @@ use farmhash;
 use std::collections::HashMap;
 use tokenizers::tokenizer::Tokenizer;
 
+/// Tokenized text with all necessary components for ONNX model inference
+#[derive(Debug, Clone)]
+pub struct TokenizedText {
+    /// Token IDs for the input text
+    pub input_ids: Vec<u32>,
+    /// Attention mask (1 for real tokens, 0 for padding)
+    pub attention_mask: Vec<u32>,
+    /// Token type IDs (0 for first sequence, 1 for second sequence in pairs)
+    pub token_type_ids: Vec<u32>,
+}
+
 /// TokenizerService handles text preprocessing, normalization, and tokenization
 /// for semantic search queries. It provides query normalization, text cleaning,
 /// and cache key generation using farmhash64.
+#[derive(Clone)]
 pub struct TokenizerService {
     tokenizer: Option<Tokenizer>,
 }
 
 impl TokenizerService {
-    /// Create a new TokenizerService instance
-    /// 
-    /// Note: For now, we create without loading a tokenizer file since the actual
-    /// model loading will be implemented in a future task. This allows us to
-    /// implement text preprocessing and normalization functionality.
-    pub fn new() -> SearchResult<Self> {
+    /// Create a new TokenizerService instance with async initialization
+    /// This will load the actual tokenizer for ONNX model integration
+    pub async fn new() -> SearchResult<Self> {
+        // For now, create without tokenizer - in production this would load
+        // the actual tokenizer.json file for the BERT-based models
+        Ok(TokenizerService {
+            tokenizer: None,
+        })
+    }
+
+    /// Create a new TokenizerService instance (sync version for compatibility)
+    pub fn new_sync() -> SearchResult<Self> {
         Ok(TokenizerService {
             tokenizer: None,
         })
@@ -138,10 +156,9 @@ impl TokenizerService {
 
     /// Tokenize text using the loaded tokenizer
     /// 
-    /// Returns token IDs that can be used for model inference.
-    /// Currently returns an error since tokenizer loading will be implemented
-    /// in the ONNX model integration task.
-    pub fn tokenize(&self, text: &str) -> SearchResult<Vec<u32>> {
+    /// Returns TokenizedText with input_ids, attention_mask, and token_type_ids
+    /// that can be used for ONNX model inference.
+    pub fn tokenize(&self, text: &str) -> SearchResult<TokenizedText> {
         match &self.tokenizer {
             Some(tokenizer) => {
                 let cleaned_text = self.clean_text(text);
@@ -150,7 +167,15 @@ impl TokenizerService {
                     .encode(cleaned_text, false)
                     .map_err(|e| SearchError::ModelError(format!("Tokenization failed: {}", e)))?;
                 
-                Ok(encoding.get_ids().to_vec())
+                let input_ids = encoding.get_ids().to_vec();
+                let attention_mask = encoding.get_attention_mask().to_vec();
+                let token_type_ids = encoding.get_type_ids().to_vec();
+                
+                Ok(TokenizedText {
+                    input_ids,
+                    attention_mask,
+                    token_type_ids,
+                })
             }
             None => {
                 // For now, return an error since we don't have a tokenizer loaded
@@ -160,6 +185,12 @@ impl TokenizerService {
                 ))
             }
         }
+    }
+
+    /// Tokenize text and return only token IDs (legacy method)
+    pub fn tokenize_ids(&self, text: &str) -> SearchResult<Vec<u32>> {
+        let tokenized = self.tokenize(text)?;
+        Ok(tokenized.input_ids)
     }
 
     /// Get the vocabulary size of the loaded tokenizer
@@ -227,7 +258,7 @@ impl TokenizerService {
 
 impl Default for TokenizerService {
     fn default() -> Self {
-        Self::new().expect("Failed to create default TokenizerService")
+        Self::new_sync().expect("Failed to create default TokenizerService")
     }
 }
 
@@ -238,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_normalize_query_basic() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Basic normalization
         assert_eq!(tokenizer.normalize_query("  Hello World  "), "hello world");
@@ -249,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_normalize_query_whitespace() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Multiple whitespace normalization
         assert_eq!(tokenizer.normalize_query("hello    world"), "hello world");
@@ -260,7 +291,7 @@ mod tests {
 
     #[test]
     fn test_normalize_query_control_characters() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Control character removal (except whitespace)
         let input_with_controls = "hello\x00\x01world\x7f";
@@ -273,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_clean_text() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Basic cleaning
         assert_eq!(tokenizer.clean_text("Hello, World!"), "hello, world!");
@@ -289,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_generate_cache_key() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Same normalized queries should produce same keys
         let key1 = tokenizer.generate_cache_key("  Hello World  ");
@@ -306,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_generate_cache_key_with_params() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         let mut filters1 = HashMap::new();
         filters1.insert("language".to_string(), "en".to_string());
@@ -331,7 +362,7 @@ mod tests {
 
     #[test]
     fn test_validate_query() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Valid queries
         assert!(tokenizer.validate_query("hello world").is_ok());
@@ -351,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_normalize_whitespace_helper() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         assert_eq!(tokenizer.normalize_whitespace("hello    world"), "hello world");
         assert_eq!(tokenizer.normalize_whitespace("  hello world  "), "hello world");
@@ -362,7 +393,7 @@ mod tests {
 
     #[test]
     fn test_edge_cases() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Empty string
         assert_eq!(tokenizer.normalize_query(""), "");
@@ -381,7 +412,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_without_tokenizer() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Should return error since no tokenizer is loaded
         let result = tokenizer.tokenize("hello world");
@@ -391,7 +422,7 @@ mod tests {
 
     #[test]
     fn test_vocab_size_without_tokenizer() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Should return error since no tokenizer is loaded
         let result = tokenizer.vocab_size();
@@ -401,7 +432,7 @@ mod tests {
 
     #[test]
     fn test_cache_key_consistency() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Test that cache keys are consistent across multiple calls
         let query = "machine learning algorithms";
@@ -418,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_query_normalization_edge_cases() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Test with various Unicode characters
         assert_eq!(tokenizer.normalize_query("café résumé naïve"), "café résumé naïve");
@@ -435,7 +466,7 @@ mod tests {
 
     #[test]
     fn test_text_cleaning_comprehensive() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Test removal of various unwanted characters
         let messy_input = "Hello@#$%World!!! This~is*a&test(){}[]|\\+=<>?/";
@@ -450,7 +481,7 @@ mod tests {
 
     #[test]
     fn test_cache_key_parameter_variations() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         let base_query = "test query";
         let mut filters = HashMap::new();
@@ -475,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_validation_comprehensive() {
-        let tokenizer = TokenizerService::new().unwrap();
+        let tokenizer = TokenizerService::new_sync().unwrap();
         
         // Test various invalid inputs
         assert!(tokenizer.validate_query("").is_err());

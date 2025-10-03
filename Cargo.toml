@@ -39,6 +39,16 @@ farmhash = "1.1"
 tokenizers = "0.15"
 # Environment variable loading
 dotenvy = "0.15"
+# HTTP client for model downloads
+reqwest = { version = "0.11", features = ["json", "stream"] }
+# SHA256 hashing for model verification
+sha2 = "0.10"
+# Hex encoding/decoding
+hex = "0.4"
+# Async file operations
+tokio-util = { version = "0.7", features = ["io"] }
+# Futures utilities
+futures = "0.3"
 
 [build-dependencies]
 tonic-build = "0.11"
@@ -46,3 +56,4 @@ tonic-build = "0.11"
 [dev-dependencies]
 axum-test = "15.0"
 tokio-test = "0.4"
+tempfile = "3.8"
