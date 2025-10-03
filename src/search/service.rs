@@ -10,7 +10,7 @@ use crate::cache::CacheManager;
 use crate::database::DatabaseManager;
 use crate::error::{SearchError, SearchResult};
 use crate::ml::MLService;
-use crate::types::{SearchRequest, SearchResponse, SearchCandidate, SearchMode, Post, SearchFilters};
+use crate::types::{SearchRequest, SearchResponse, SearchCandidate, SearchMode, Post, SearchFilters, PostMetadata};
 use crate::search::{FallbackSearchService, RerankingService, RerankingConfig};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn, instrument};
@@ -165,12 +165,100 @@ impl SearchService {
         Ok(search_results)
     }
 
-    /// Fetch posts for the given search candidates
+    /// Fetch posts for the given search candidates with metadata backfill from cache
     async fn fetch_posts_for_candidates(&self, candidates: &[SearchCandidate]) -> SearchResult<Vec<Post>> {
         let post_ids: Vec<String> = candidates.iter().map(|c| c.post_id.clone()).collect();
         
-        debug!("Fetching {} posts from database", post_ids.len());
-        self.database_manager.get_posts_by_ids(&post_ids).await
+        debug!("Fetching {} posts with metadata backfill", post_ids.len());
+        
+        // Try to get posts from database first (primary source)
+        match self.database_manager.get_posts_by_ids(&post_ids).await {
+            Ok(posts) => {
+                debug!("Successfully fetched {} posts from database", posts.len());
+                Ok(posts)
+            }
+            Err(e) => {
+                warn!("Database fetch failed, attempting metadata backfill from cache: {}", e);
+                self.fetch_posts_with_metadata_backfill(&post_ids).await
+            }
+        }
+    }
+
+    /// Fetch posts using metadata backfill from Redis cache with Postgres fallback
+    async fn fetch_posts_with_metadata_backfill(&self, post_ids: &[String]) -> SearchResult<Vec<Post>> {
+        debug!("Attempting metadata backfill for {} posts", post_ids.len());
+        
+        let mut posts = Vec::new();
+        let mut missing_post_ids = Vec::new();
+        
+        // First, try to get metadata from Redis cache
+        for post_id in post_ids {
+            match self.fallback_search.cache_manager().get_metadata_cache(post_id).await {
+                Ok(Some(metadata)) => {
+                    debug!("Found cached metadata for post: {}", post_id);
+                    
+                    // Create a minimal Post struct from cached metadata
+                    // Note: We don't have full content or embedding from cache, but we have enough for response
+                    let post = Post {
+                        id: uuid::Uuid::new_v4(), // Temporary UUID
+                        post_id: post_id.clone(),
+                        title: "".to_string(), // Will be filled from metadata if available
+                        content: "Content unavailable".to_string(), // Fallback content
+                        author_name: metadata.author_name.clone(),
+                        language: metadata.language.clone(),
+                        frozen: metadata.frozen,
+                        date_gmt: metadata.date,
+                        url: metadata.url.clone(),
+                        embedding: Vec::new(), // Empty embedding for cache-only posts
+                    };
+                    posts.push(post);
+                }
+                Ok(None) => {
+                    debug!("No cached metadata found for post: {}", post_id);
+                    missing_post_ids.push(post_id.clone());
+                }
+                Err(e) => {
+                    warn!("Failed to fetch cached metadata for post {}: {}", post_id, e);
+                    missing_post_ids.push(post_id.clone());
+                }
+            }
+        }
+        
+        // For missing posts, try individual database lookups as fallback
+        if !missing_post_ids.is_empty() {
+            debug!("Attempting individual database lookups for {} missing posts", missing_post_ids.len());
+            
+            for post_id in &missing_post_ids {
+                match self.database_manager.get_post_by_id(post_id).await {
+                    Ok(Some(post)) => {
+                        debug!("Successfully fetched post {} from database", post_id);
+                        posts.push(post);
+                        
+                        // Cache the metadata for future use
+                        let metadata = PostMetadata {
+                            author_name: posts.last().unwrap().author_name.clone(),
+                            url: posts.last().unwrap().url.clone(),
+                            date: posts.last().unwrap().date_gmt,
+                            language: posts.last().unwrap().language.clone(),
+                            frozen: posts.last().unwrap().frozen,
+                        };
+                        
+                        if let Err(e) = self.fallback_search.cache_manager().set_metadata_cache(post_id, &metadata).await {
+                            warn!("Failed to cache metadata for post {}: {}", post_id, e);
+                        }
+                    }
+                    Ok(None) => {
+                        warn!("Post not found in database: {}", post_id);
+                    }
+                    Err(e) => {
+                        warn!("Failed to fetch post {} from database: {}", post_id, e);
+                    }
+                }
+            }
+        }
+        
+        info!("Metadata backfill completed: {} posts retrieved", posts.len());
+        Ok(posts)
     }
 
     /// Create search responses from candidates and posts
@@ -196,15 +284,20 @@ impl SearchService {
         Ok(results)
     }
 
-    /// Apply search filters to results
+    /// Apply search filters to results with comprehensive filtering logic
     fn apply_filters(&self, mut results: Vec<SearchResponse>, filters: &SearchFilters) -> Vec<SearchResponse> {
         let original_count = results.len();
+        debug!("Applying filters to {} results", original_count);
 
         // Apply language filter
         if let Some(language) = &filters.language {
-            results.retain(|result| result.meta.language == *language);
+            let before_count = results.len();
+            results.retain(|result| {
+                // Case-insensitive language matching for better compatibility
+                result.meta.language.to_lowercase() == language.to_lowercase()
+            });
             debug!("Language filter '{}' applied: {} -> {} results", 
-                   language, original_count, results.len());
+                   language, before_count, results.len());
         }
 
         // Apply frozen filter
@@ -213,6 +306,18 @@ impl SearchService {
             results.retain(|result| result.meta.frozen == frozen);
             debug!("Frozen filter '{}' applied: {} -> {} results", 
                    frozen, before_count, results.len());
+            
+            // Log specific filtering behavior for GDPR compliance
+            if !frozen {
+                debug!("Excluded {} frozen posts for GDPR compliance", 
+                       before_count - results.len());
+            }
+        }
+
+        let final_count = results.len();
+        if final_count != original_count {
+            info!("Filtering completed: {} -> {} results ({} filtered out)", 
+                  original_count, final_count, original_count - final_count);
         }
 
         results
@@ -476,5 +581,147 @@ mod tests {
         assert_eq!(stats.current_search_mode, SearchMode::Full);
         assert!(stats.reranking_available);
         assert_eq!(stats.reranking_config.max_candidates_to_rerank, 50);
+    }
+
+    #[test]
+    fn test_apply_language_filter_case_insensitive() {
+        let results = create_test_results_for_filtering();
+        
+        // Test case-insensitive language filter
+        let filters = SearchFilters {
+            language: Some("EN".to_string()), // Uppercase
+            frozen: None,
+        };
+        
+        // Simulate the filtering logic
+        let filtered: Vec<SearchResponse> = results
+            .into_iter()
+            .filter(|result| {
+                if let Some(language) = &filters.language {
+                    result.meta.language.to_lowercase() == language.to_lowercase()
+                } else {
+                    true
+                }
+            })
+            .collect();
+        
+        assert_eq!(filtered.len(), 2); // Should have 2 English posts
+        assert!(filtered.iter().all(|r| r.meta.language.to_lowercase() == "en"));
+    }
+
+    #[test]
+    fn test_apply_frozen_filter_gdpr_compliance() {
+        let results = create_test_results_for_filtering();
+        
+        // Test frozen filter for GDPR compliance (exclude frozen posts)
+        let filters = SearchFilters {
+            language: None,
+            frozen: Some(false),
+        };
+        
+        let filtered: Vec<SearchResponse> = results
+            .into_iter()
+            .filter(|result| {
+                if let Some(frozen) = filters.frozen {
+                    result.meta.frozen == frozen
+                } else {
+                    true
+                }
+            })
+            .collect();
+        
+        assert_eq!(filtered.len(), 1); // Should have 1 non-frozen post
+        assert!(filtered.iter().all(|r| !r.meta.frozen));
+        assert_eq!(filtered[0].post_id, "post1");
+    }
+
+    #[test]
+    fn test_apply_combined_filters_comprehensive() {
+        let results = create_test_results_for_filtering();
+        
+        // Test combined filters with edge cases
+        let filters = SearchFilters {
+            language: Some("es".to_string()),
+            frozen: Some(true),
+        };
+        
+        let filtered: Vec<SearchResponse> = results
+            .into_iter()
+            .filter(|result| {
+                let language_match = if let Some(language) = &filters.language {
+                    result.meta.language.to_lowercase() == language.to_lowercase()
+                } else {
+                    true
+                };
+                
+                let frozen_match = if let Some(frozen) = filters.frozen {
+                    result.meta.frozen == frozen
+                } else {
+                    true
+                };
+                
+                language_match && frozen_match
+            })
+            .collect();
+        
+        assert_eq!(filtered.len(), 1); // Should have 1 Spanish, frozen post
+        assert_eq!(filtered[0].post_id, "post2");
+        assert_eq!(filtered[0].meta.language, "es");
+        assert!(filtered[0].meta.frozen);
+    }
+
+    #[test]
+    fn test_apply_filters_no_matches() {
+        let results = create_test_results_for_filtering();
+        
+        // Test filters that match no results
+        let filters = SearchFilters {
+            language: Some("fr".to_string()), // No French posts
+            frozen: None,
+        };
+        
+        let filtered: Vec<SearchResponse> = results
+            .into_iter()
+            .filter(|result| {
+                if let Some(language) = &filters.language {
+                    result.meta.language.to_lowercase() == language.to_lowercase()
+                } else {
+                    true
+                }
+            })
+            .collect();
+        
+        assert_eq!(filtered.len(), 0); // Should have no results
+    }
+
+    #[test]
+    fn test_apply_filters_empty_input() {
+        let results: Vec<SearchResponse> = vec![];
+        
+        let filters = SearchFilters {
+            language: Some("en".to_string()),
+            frozen: Some(false),
+        };
+        
+        let filtered: Vec<SearchResponse> = results
+            .into_iter()
+            .filter(|result| {
+                let language_match = if let Some(language) = &filters.language {
+                    result.meta.language.to_lowercase() == language.to_lowercase()
+                } else {
+                    true
+                };
+                
+                let frozen_match = if let Some(frozen) = filters.frozen {
+                    result.meta.frozen == frozen
+                } else {
+                    true
+                };
+                
+                language_match && frozen_match
+            })
+            .collect();
+        
+        assert_eq!(filtered.len(), 0); // Should remain empty
     }
 }

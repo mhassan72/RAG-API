@@ -406,6 +406,11 @@ impl FallbackSearchService {
         self.determine_search_mode().await
     }
 
+    /// Get cache manager reference for metadata operations
+    pub fn cache_manager(&self) -> &Arc<CacheManager> {
+        &self.cache_manager
+    }
+
     /// Perform health check
     pub async fn health_check(&self) -> SearchResult<FallbackHealthStatus> {
         let (redis_health, postgres_health) = tokio::join!(
