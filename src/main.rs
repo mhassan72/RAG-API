@@ -2,6 +2,7 @@ mod server;
 mod ml;
 mod search;
 mod cache;
+mod database;
 mod error;
 mod types;
 mod config;
