@@ -1,4 +1,5 @@
 mod server;
+mod grpc;
 mod ml;
 mod search;
 mod cache;
@@ -27,6 +28,10 @@ async fn main() -> Result<(), SearchError> {
     tracing::info!("Server will listen on {}:{}", config.server.host, config.server.port);
 
     let server = SearchServer::new(config).await?;
+    
+    // For now, just run the HTTP server
+    // gRPC functionality is available via the GrpcSearchService
+    tracing::info!("Starting HTTP server (gRPC service available programmatically)");
     server.run().await?;
 
     Ok(())

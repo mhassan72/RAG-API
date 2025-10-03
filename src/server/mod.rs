@@ -193,20 +193,37 @@ impl SearchServer {
         Ok(SearchServer { app, config })
     }
 
-    /// Run the server
+    /// Run the HTTP server only
     pub async fn run(self) -> SearchResult<()> {
         let bind_addr = format!("{}:{}", self.config.server.host, self.config.server.port);
         let listener = TcpListener::bind(&bind_addr)
             .await
             .map_err(|e| SearchError::ConfigError(format!("Failed to bind to {}: {}", bind_addr, e)))?;
 
-        info!("Server listening on {}", bind_addr);
+        info!("HTTP server listening on {}", bind_addr);
 
         axum::serve(listener, self.app)
             .await
             .map_err(|e| SearchError::Internal(format!("Server error: {}", e)))?;
 
         Ok(())
+    }
+
+    /// Get the gRPC service for external use
+    pub async fn create_grpc_service(&self) -> SearchResult<crate::grpc::GrpcSearchService> {
+        // Create the same services that the HTTP server uses
+        let cache_manager = Arc::new(crate::cache::CacheManager::new(self.config.redis.clone()).await?);
+        let database_manager = Arc::new(crate::database::DatabaseManager::new(self.config.database.clone()).await?);
+        let ml_service = Arc::new(crate::ml::MLService::new().await?);
+        let search_service = Arc::new(
+            crate::search::SearchService::new(
+                cache_manager,
+                database_manager,
+                ml_service,
+            ).await?
+        );
+
+        Ok(crate::grpc::GrpcSearchService::new(search_service))
     }
 }
 

@@ -1,4 +1,5 @@
 pub mod server;
+pub mod grpc;
 pub mod ml;
 pub mod search;
 pub mod cache;

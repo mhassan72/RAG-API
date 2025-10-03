@@ -10,6 +10,12 @@ axum = "0.7"
 tokio = { version = "1.0", features = ["full"] }
 # gRPC framework
 tonic = "0.11"
+# Protocol buffers
+prost = "0.12"
+# Async streams for gRPC
+tokio-stream = "0.1"
+# Async trait support
+async-trait = "0.1"
 # ONNX Runtime for ML inference
 ort = "2.0.0-rc.10"
 # Redis client with cluster and TLS support
@@ -70,6 +76,7 @@ tower-http = { version = "0.5", features = ["cors", "limit", "set-header"] }
 
 [build-dependencies]
 tonic-build = "0.11"
+prost-build = "0.12"
 
 [dev-dependencies]
 axum-test = "15.0"

@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package search;
+
+// gRPC service definition for semantic search
+service SemanticSearchService {
+    // Streaming semantic search endpoint
+    rpc SemanticSearch(SearchRequest) returns (stream SearchResponse);
+    
+    // Health check endpoint
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// Search request message
+message SearchRequest {
+    // Natural language query
+    string query = 1;
+    
+    // Maximum number of results to return (max 50)
+    uint32 k = 2;
+    
+    // Minimum similarity score threshold (optional)
+    optional float min_score = 3;
+    
+    // Enable cross-encoder reranking
+    bool rerank = 4;
+    
+    // Optional filters for search results
+    optional SearchFilters filters = 5;
+}
+
+// Search filters for metadata-based filtering
+message SearchFilters {
+    // Filter by language (e.g., "en", "es")
+    optional string language = 1;
+    
+    // Filter by frozen status (false excludes frozen posts)
+    optional bool frozen = 2;
+}
+
+// Search response message
+message SearchResponse {
+    // Unique post identifier
+    string post_id = 1;
+    
+    // Post title
+    string title = 2;
+    
+    // Post snippet (truncated to 300 chars for GDPR)
+    string snippet = 3;
+    
+    // Similarity score (0.0 to 1.0)
+    float score = 4;
+    
+    // Additional post metadata
+    PostMetadata meta = 5;
+}
+
+// Post metadata message
+message PostMetadata {
+    // Post author name
+    string author_name = 1;
+    
+    // Post URL
+    string url = 2;
+    
+    // Post publication date (RFC3339 format)
+    string date = 3;
+    
+    // Post language
+    string language = 4;
+    
+    // Whether the post is frozen
+    bool frozen = 5;
+}
+
+// Health check request
+message HealthCheckRequest {
+    // Service name to check (optional)
+    string service = 1;
+}
+
+// Health check response
+message HealthCheckResponse {
+    // Health status
+    HealthStatus status = 1;
+    
+    // Additional status message
+    string message = 2;
+    
+    // Timestamp of the check
+    string timestamp = 3;
+}
+
+// Health status enumeration
+enum HealthStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+    SERVICE_UNKNOWN = 3;
+}
