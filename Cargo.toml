@@ -12,8 +12,8 @@ tokio = { version = "1.0", features = ["full"] }
 tonic = "0.11"
 # ONNX Runtime for ML inference
 ort = "2.0.0-rc.10"
-# Redis client
-redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+# Redis client with cluster and TLS support
+fred = { version = "8.0", features = ["enable-native-tls"] }
 # PostgreSQL client
 tokio-postgres = "0.7"
 # Connection pooling for Postgres

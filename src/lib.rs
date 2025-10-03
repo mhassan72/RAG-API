@@ -11,3 +11,4 @@ pub use types::*;
 pub use server::SearchServer;
 pub use config::Config;
 pub use ml::TokenizerService;
+pub use cache::CacheManager;
