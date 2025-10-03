@@ -290,7 +290,7 @@ mod tests {
         
         // Test IO errors
         let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "File not found");
-        let search_error = SearchError::IoError(io_error);
+        let search_error = SearchError::IoError(io_error.to_string());
         assert_eq!(search_error.status_code(), 500);
         
         // Test configuration errors

@@ -51,6 +51,8 @@ hex = "0.4"
 tokio-util = { version = "0.7", features = ["io"] }
 # Futures utilities
 futures = "0.3"
+# Random number generation for jitter
+rand = "0.8"
 
 [build-dependencies]
 tonic-build = "0.11"

@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 /// Main error type for the search service
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum SearchError {
     /// Invalid request parameters
     #[error("Invalid request: {0}")]
@@ -37,11 +37,11 @@ pub enum SearchError {
 
     /// IO error
     #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(String),
 
     /// Serialization error
     #[error("Serialization error: {0}")]
-    SerializationError(#[from] serde_json::Error),
+    SerializationError(String),
 
     /// Generic internal error
     #[error("Internal error: {0}")]
@@ -104,5 +104,17 @@ pub enum ValidationError {
 impl From<ValidationError> for SearchError {
     fn from(err: ValidationError) -> Self {
         SearchError::InvalidRequest(err.to_string())
+    }
+}
+
+impl From<std::io::Error> for SearchError {
+    fn from(err: std::io::Error) -> Self {
+        SearchError::IoError(err.to_string())
+    }
+}
+
+impl From<serde_json::Error> for SearchError {
+    fn from(err: serde_json::Error) -> Self {
+        SearchError::SerializationError(err.to_string())
     }
 }

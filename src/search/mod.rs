@@ -3,8 +3,17 @@
 /// This module implements parallel vector search coordination across Redis and Postgres
 /// with result merging, deduplication, and graceful failure handling.
 
+pub mod circuit_breaker;
+pub mod retry;
+pub mod fallback;
+
 #[cfg(test)]
 mod tests;
+
+// Re-export main components
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState};
+pub use retry::{RetryExecutor, RetryConfig, RetryStrategy};
+pub use fallback::{FallbackSearchService, FallbackHealthStatus};
 
 use crate::cache::CacheManager;
 use crate::database::DatabaseManager;

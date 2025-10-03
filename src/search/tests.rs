@@ -317,6 +317,327 @@ mod tests {
     }
 }
 
+// Tests for circuit breaker and fallback functionality
+#[cfg(test)]
+mod circuit_breaker_tests {
+    use super::*;
+    use crate::search::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
+    use crate::search::fallback::FallbackSearchService;
+    use std::time::Duration;
+    use tokio::time::sleep;
+
+    #[tokio::test]
+    async fn test_circuit_breaker_basic_functionality() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 3,
+            recovery_timeout: Duration::from_millis(100),
+            success_threshold: 2,
+            failure_window: Duration::from_secs(60),
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Initial state should be Closed
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(!cb.is_redis_circuit_open().await);
+
+        // Record failures to open circuit
+        cb.record_redis_failure().await;
+        assert_eq!(cb.state(), CircuitState::Closed);
+
+        cb.record_redis_failure().await;
+        assert_eq!(cb.state(), CircuitState::Closed);
+
+        cb.record_redis_failure().await;
+        assert_eq!(cb.state(), CircuitState::Open);
+        assert!(cb.is_redis_circuit_open().await);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_recovery() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            recovery_timeout: Duration::from_millis(50),
+            success_threshold: 2,
+            failure_window: Duration::from_secs(60),
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Open the circuit
+        cb.record_redis_failure().await;
+        cb.record_redis_failure().await;
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Wait for recovery timeout
+        sleep(Duration::from_millis(100)).await;
+
+        // Should transition to HalfOpen
+        assert!(!cb.is_redis_circuit_open().await);
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // Record successes to close circuit
+        cb.record_redis_success().await;
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        cb.record_redis_success().await;
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_half_open_failure() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            recovery_timeout: Duration::from_millis(50),
+            success_threshold: 2,
+            failure_window: Duration::from_secs(60),
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Open the circuit
+        cb.record_redis_failure().await;
+        cb.record_redis_failure().await;
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Wait and transition to HalfOpen
+        sleep(Duration::from_millis(100)).await;
+        cb.is_redis_circuit_open().await;
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // Failure should reopen circuit
+        cb.record_redis_failure().await;
+        assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_failure_window() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 3,
+            recovery_timeout: Duration::from_millis(50),
+            success_threshold: 2,
+            failure_window: Duration::from_millis(100),
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Record failures
+        cb.record_redis_failure().await;
+        cb.record_redis_failure().await;
+
+        // Wait for failures to age out
+        sleep(Duration::from_millis(150)).await;
+
+        // Should not open circuit as old failures are cleaned up
+        cb.record_redis_failure().await;
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_stats() {
+        let cb = CircuitBreaker::new();
+
+        cb.record_redis_failure().await;
+        cb.record_postgres_failure().await;
+
+        let stats = cb.get_stats().await;
+        assert_eq!(stats.state, CircuitState::Closed);
+        assert_eq!(stats.redis_failures, 1);
+        assert_eq!(stats.postgres_failures, 1);
+        assert_eq!(stats.recent_failures, 1);
+        assert_eq!(stats.success_count, 0);
+    }
+
+    // Mock implementations for testing fallback service
+    struct MockCacheManagerForFallback {
+        should_fail: bool,
+        candidates: Vec<SearchCandidate>,
+    }
+
+    impl MockCacheManagerForFallback {
+        fn new(candidates: Vec<SearchCandidate>) -> Self {
+            Self {
+                should_fail: false,
+                candidates,
+            }
+        }
+
+        fn with_failure() -> Self {
+            Self {
+                should_fail: true,
+                candidates: Vec::new(),
+            }
+        }
+
+        async fn vector_search(&self, _query_vector: &[f32], limit: usize) -> SearchResult<Vec<SearchCandidate>> {
+            if self.should_fail {
+                return Err(SearchError::RedisError("Mock Redis failure".to_string()));
+            }
+            
+            let mut results = self.candidates.clone();
+            results.truncate(limit);
+            Ok(results)
+        }
+
+        async fn health_check(&self) -> SearchResult<()> {
+            if self.should_fail {
+                Err(SearchError::RedisError("Mock Redis unhealthy".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct MockDatabaseManagerForFallback {
+        should_fail: bool,
+        candidates: Vec<SearchCandidate>,
+    }
+
+    impl MockDatabaseManagerForFallback {
+        fn new(candidates: Vec<SearchCandidate>) -> Self {
+            Self {
+                should_fail: false,
+                candidates,
+            }
+        }
+
+        fn with_failure() -> Self {
+            Self {
+                should_fail: true,
+                candidates: Vec::new(),
+            }
+        }
+
+        async fn vector_search(&self, _query_vector: &[f32], limit: usize) -> SearchResult<Vec<SearchCandidate>> {
+            if self.should_fail {
+                return Err(SearchError::DatabaseError("Mock Postgres failure".to_string()));
+            }
+            
+            let mut results = self.candidates.clone();
+            results.truncate(limit);
+            Ok(results)
+        }
+
+        async fn health_check(&self) -> SearchResult<()> {
+            if self.should_fail {
+                Err(SearchError::DatabaseError("Mock Postgres unhealthy".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    // Note: These tests would require proper mocking framework integration
+    // For now, they serve as documentation of the expected behavior
+    
+    #[tokio::test]
+    async fn test_fallback_search_mode_determination() {
+        // This test demonstrates the expected behavior for search mode determination
+        // In a real implementation, we would use proper mocks
+        
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            recovery_timeout: Duration::from_millis(50),
+            success_threshold: 2,
+            failure_window: Duration::from_secs(60),
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Initially should be Full mode (circuit closed, both services healthy)
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(!cb.is_redis_circuit_open().await);
+
+        // After failures, should be PostgresOnly mode
+        cb.record_redis_failure().await;
+        cb.record_redis_failure().await;
+        assert_eq!(cb.state(), CircuitState::Open);
+        assert!(cb.is_redis_circuit_open().await);
+    }
+
+    #[tokio::test]
+    async fn test_retry_logic_integration() {
+        use crate::search::retry::{RetryExecutor, RetryConfig};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let config = RetryConfig {
+            max_retries: 3,
+            base_delay: Duration::from_millis(1), // Fast for testing
+            max_delay: Duration::from_millis(10),
+            jitter_factor: 0.0, // No jitter for predictable testing
+        };
+        let executor = RetryExecutor::with_config(config);
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+
+        // Test successful retry after failures
+        let result = executor.execute(|| {
+            let counter = counter_clone.clone();
+            async move {
+                let count = counter.fetch_add(1, Ordering::SeqCst);
+                if count < 2 {
+                    Err(SearchError::RedisError("Temporary failure".to_string()))
+                } else {
+                    Ok::<i32, SearchError>(42)
+                }
+            }
+        }).await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(counter.load(Ordering::SeqCst), 3); // 1 initial + 2 retries
+    }
+
+    #[tokio::test]
+    async fn test_retry_logic_exhaustion() {
+        use crate::search::retry::{RetryExecutor, RetryConfig};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let config = RetryConfig {
+            max_retries: 2,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            jitter_factor: 0.0,
+        };
+        let executor = RetryExecutor::with_config(config);
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+
+        // Test retry exhaustion
+        let result = executor.execute(|| {
+            let counter = counter_clone.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<i32, SearchError>(SearchError::RedisError("Persistent failure".to_string()))
+            }
+        }).await;
+
+        assert!(result.is_err());
+        assert_eq!(counter.load(Ordering::SeqCst), 3); // 1 initial + 2 retries
+    }
+
+    #[tokio::test]
+    async fn test_retry_no_retry_on_client_errors() {
+        use crate::search::retry::{RetryExecutor, RetryConfig};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let config = RetryConfig::default();
+        let executor = RetryExecutor::with_config(config);
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+
+        // Test that client errors are not retried
+        let result = executor.execute(|| {
+            let counter = counter_clone.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<i32, SearchError>(SearchError::InvalidRequest("Bad request".to_string()))
+            }
+        }).await;
+
+        assert!(result.is_err());
+        assert_eq!(counter.load(Ordering::SeqCst), 1); // No retries for client errors
+    }
+}
+
 // Integration tests that would require real Redis/Postgres connections
 #[cfg(test)]
 mod integration_tests {

@@ -14,3 +14,8 @@ pub use config::Config;
 pub use ml::TokenizerService;
 pub use cache::CacheManager;
 pub use database::DatabaseManager;
+pub use search::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState,
+    RetryExecutor, RetryConfig, RetryStrategy,
+    FallbackSearchService, FallbackHealthStatus
+};

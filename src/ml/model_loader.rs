@@ -77,8 +77,7 @@ impl ModelLoader {
     ) -> SearchResult<PathBuf> {
         // Create cache directory if it doesn't exist
         fs::create_dir_all(&self.config.model_cache_dir)
-            .await
-            .map_err(|e| SearchError::IoError(e))?;
+            .await?;
 
         let model_path = self.config.model_cache_dir.join(model_filename);
 
@@ -92,8 +91,7 @@ impl ModelLoader {
                 Ok(false) => {
                     warn!("Model {} has incorrect hash, re-downloading", model_filename);
                     fs::remove_file(&model_path)
-                        .await
-                        .map_err(|e| SearchError::IoError(e))?;
+                        .await?;
                 }
                 Err(e) => {
                     warn!("Failed to verify model hash: {}, re-downloading", e);
@@ -108,8 +106,7 @@ impl ModelLoader {
         // Verify downloaded model
         if !self.verify_model_hash(&model_path, expected_hash).await? {
             fs::remove_file(&model_path)
-                .await
-                .map_err(|e| SearchError::IoError(e))?;
+                .await?;
             
             return Err(SearchError::ModelError(format!(
                 "Downloaded model {} has incorrect SHA256 hash. Expected: {}, service will crash to prevent using corrupted model.",
@@ -141,8 +138,7 @@ impl ModelLoader {
         }
 
         let mut file = fs::File::create(local_path)
-            .await
-            .map_err(|e| SearchError::IoError(e))?;
+            .await?;
 
         let mut stream = response.bytes_stream();
         use futures::StreamExt;
@@ -150,11 +146,10 @@ impl ModelLoader {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| SearchError::ModelError(format!("Download error: {}", e)))?;
             file.write_all(&chunk)
-                .await
-                .map_err(|e| SearchError::IoError(e))?;
+                .await?;
         }
 
-        file.flush().await.map_err(|e| SearchError::IoError(e))?;
+        file.flush().await?;
         info!("Model downloaded to: {}", local_path.display());
 
         Ok(())
@@ -163,8 +158,7 @@ impl ModelLoader {
     /// Verify model file SHA256 hash
     async fn verify_model_hash(&self, model_path: &Path, expected_hash: &str) -> SearchResult<bool> {
         let file_content = fs::read(model_path)
-            .await
-            .map_err(|e| SearchError::IoError(e))?;
+            .await?;
 
         let mut hasher = Sha256::new();
         hasher.update(&file_content);
