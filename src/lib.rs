@@ -10,3 +10,4 @@ pub use error::{SearchError, SearchResult};
 pub use types::*;
 pub use server::SearchServer;
 pub use config::Config;
+pub use ml::TokenizerService;

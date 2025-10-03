@@ -1,12 +1,15 @@
 /// ML inference module for ONNX models
 /// 
-/// This module will contain:
-/// - BiEncoder for generating embeddings
-/// - CrossEncoder for reranking
-/// - TokenizerService for text preprocessing
-/// - ModelLoader for downloading and verifying models
+/// This module contains:
+/// - TokenizerService for text preprocessing and tokenization
+/// - BiEncoder for generating embeddings (future task)
+/// - CrossEncoder for reranking (future task)
+/// - ModelLoader for downloading and verifying models (future task)
+
+pub mod tokenizer;
 
 use crate::error::{SearchError, SearchResult};
+pub use tokenizer::TokenizerService;
 
 /// Placeholder for ML service
 pub struct MLService {
