@@ -304,6 +304,222 @@ async fn test_redis_stats() {
     }
 }
 
+#[tokio::test]
+#[ignore = "requires Redis connection"]
+async fn test_cache_hit_miss_statistics() {
+    let config = create_test_redis_config();
+    
+    if let Ok(cache_manager) = CacheManager::new(config).await {
+        // Reset statistics to start fresh
+        cache_manager.reset_cache_stats();
+        
+        let post_id = "test_stats_post";
+        let embedding = vec![0.1, 0.2, 0.3, 0.4];
+        let metadata = create_test_metadata();
+        let query_hash = 98765u64;
+        let results = create_test_cached_results();
+        
+        // Initial stats should be zero
+        let initial_stats = cache_manager.get_cache_stats();
+        assert_eq!(initial_stats.vector_cache_hits, 0);
+        assert_eq!(initial_stats.vector_cache_misses, 0);
+        assert_eq!(initial_stats.topk_cache_hits, 0);
+        assert_eq!(initial_stats.topk_cache_misses, 0);
+        assert_eq!(initial_stats.metadata_cache_hits, 0);
+        assert_eq!(initial_stats.metadata_cache_misses, 0);
+        
+        // Test cache misses first
+        let _ = cache_manager.get_vector_cache(post_id).await;
+        let _ = cache_manager.get_metadata_cache(post_id).await;
+        let _ = cache_manager.get_top_k_cache(query_hash).await;
+        
+        let miss_stats = cache_manager.get_cache_stats();
+        assert_eq!(miss_stats.vector_cache_misses, 1);
+        assert_eq!(miss_stats.metadata_cache_misses, 1);
+        assert_eq!(miss_stats.topk_cache_misses, 1);
+        
+        // Store data in caches
+        let _ = cache_manager.set_vector_cache(post_id, &embedding).await;
+        let _ = cache_manager.set_metadata_cache(post_id, &metadata).await;
+        let _ = cache_manager.set_top_k_cache(query_hash, &results).await;
+        
+        // Test cache hits
+        let _ = cache_manager.get_vector_cache(post_id).await;
+        let _ = cache_manager.get_metadata_cache(post_id).await;
+        let _ = cache_manager.get_top_k_cache(query_hash).await;
+        
+        let hit_stats = cache_manager.get_cache_stats();
+        assert_eq!(hit_stats.vector_cache_hits, 1);
+        assert_eq!(hit_stats.metadata_cache_hits, 1);
+        assert_eq!(hit_stats.topk_cache_hits, 1);
+        assert_eq!(hit_stats.vector_cache_misses, 1);
+        assert_eq!(hit_stats.metadata_cache_misses, 1);
+        assert_eq!(hit_stats.topk_cache_misses, 1);
+        
+        // Test hit ratios
+        assert!((hit_stats.vector_hit_ratio() - 0.5).abs() < f64::EPSILON);
+        assert!((hit_stats.metadata_hit_ratio() - 0.5).abs() < f64::EPSILON);
+        assert!((hit_stats.topk_hit_ratio() - 0.5).abs() < f64::EPSILON);
+        assert!((hit_stats.overall_hit_ratio() - 0.5).abs() < f64::EPSILON);
+        
+        // Clean up
+        let _ = cache_manager.invalidate_post_data(post_id).await;
+        
+        // Test GDPR statistics
+        let gdpr_stats = cache_manager.get_cache_stats();
+        assert_eq!(gdpr_stats.gdpr_deletions, 1);
+        assert!(gdpr_stats.gdpr_keys_deleted >= 1); // At least 1 key deleted
+        
+    } else {
+        println!("Skipping Redis-dependent test - Redis not available");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Redis connection"]
+async fn test_cache_statistics_edge_cases() {
+    let config = create_test_redis_config();
+    
+    if let Ok(cache_manager) = CacheManager::new(config).await {
+        // Reset statistics
+        cache_manager.reset_cache_stats();
+        
+        // Test hit ratios with zero operations
+        let empty_stats = cache_manager.get_cache_stats();
+        assert_eq!(empty_stats.vector_hit_ratio(), 0.0);
+        assert_eq!(empty_stats.topk_hit_ratio(), 0.0);
+        assert_eq!(empty_stats.metadata_hit_ratio(), 0.0);
+        assert_eq!(empty_stats.overall_hit_ratio(), 0.0);
+        
+        // Test with only hits (100% hit ratio)
+        let post_id = "test_edge_case";
+        let embedding = vec![0.5, 0.6, 0.7];
+        let _ = cache_manager.set_vector_cache(post_id, &embedding).await;
+        let _ = cache_manager.get_vector_cache(post_id).await;
+        
+        let hit_only_stats = cache_manager.get_cache_stats();
+        assert_eq!(hit_only_stats.vector_hit_ratio(), 1.0);
+        
+        // Clean up
+        let _ = cache_manager.invalidate_post_data(post_id).await;
+        
+    } else {
+        println!("Skipping Redis-dependent test - Redis not available");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Redis connection"]
+async fn test_comprehensive_cache_workflow() {
+    let config = create_test_redis_config();
+    
+    if let Ok(cache_manager) = CacheManager::new(config).await {
+        // Reset statistics
+        cache_manager.reset_cache_stats();
+        
+        let post_id = "comprehensive_test_post";
+        let embedding = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        let metadata = create_test_metadata();
+        let query_hash = cache_manager.generate_query_hash("test comprehensive workflow");
+        let results = create_test_cached_results();
+        
+        // Step 1: Test initial cache misses
+        assert!(cache_manager.get_vector_cache(post_id).await.unwrap().is_none());
+        assert!(cache_manager.get_metadata_cache(post_id).await.unwrap().is_none());
+        assert!(cache_manager.get_top_k_cache(query_hash).await.unwrap().is_none());
+        
+        // Step 2: Populate all caches
+        assert!(cache_manager.set_vector_cache(post_id, &embedding).await.is_ok());
+        assert!(cache_manager.set_metadata_cache(post_id, &metadata).await.is_ok());
+        assert!(cache_manager.set_top_k_cache(query_hash, &results).await.is_ok());
+        
+        // Step 3: Test cache hits
+        let cached_vector = cache_manager.get_vector_cache(post_id).await.unwrap();
+        assert!(cached_vector.is_some());
+        assert_eq!(cached_vector.unwrap().len(), embedding.len());
+        
+        let cached_metadata = cache_manager.get_metadata_cache(post_id).await.unwrap();
+        assert!(cached_metadata.is_some());
+        assert_eq!(cached_metadata.unwrap().author_name, metadata.author_name);
+        
+        let cached_results = cache_manager.get_top_k_cache(query_hash).await.unwrap();
+        assert!(cached_results.is_some());
+        assert_eq!(cached_results.unwrap().len(), results.len());
+        
+        // Step 4: Verify statistics
+        let stats = cache_manager.get_cache_stats();
+        assert_eq!(stats.vector_cache_hits, 1);
+        assert_eq!(stats.vector_cache_misses, 1);
+        assert_eq!(stats.metadata_cache_hits, 1);
+        assert_eq!(stats.metadata_cache_misses, 1);
+        assert_eq!(stats.topk_cache_hits, 1);
+        assert_eq!(stats.topk_cache_misses, 1);
+        
+        // Step 5: Test GDPR deletion
+        assert!(cache_manager.invalidate_post_data(post_id).await.is_ok());
+        
+        // Step 6: Verify data is deleted
+        assert!(cache_manager.get_vector_cache(post_id).await.unwrap().is_none());
+        assert!(cache_manager.get_metadata_cache(post_id).await.unwrap().is_none());
+        
+        // Step 7: Verify GDPR statistics
+        let final_stats = cache_manager.get_cache_stats();
+        assert_eq!(final_stats.gdpr_deletions, 1);
+        assert!(final_stats.gdpr_keys_deleted >= 1);
+        
+    } else {
+        println!("Skipping Redis-dependent test - Redis not available");
+    }
+}
+
+#[test]
+fn test_cache_stats_calculations() {
+    use super::redis_client::CacheStats;
+    
+    // Test with zero operations
+    let empty_stats = CacheStats::default();
+    assert_eq!(empty_stats.vector_hit_ratio(), 0.0);
+    assert_eq!(empty_stats.topk_hit_ratio(), 0.0);
+    assert_eq!(empty_stats.metadata_hit_ratio(), 0.0);
+    assert_eq!(empty_stats.overall_hit_ratio(), 0.0);
+    
+    // Test with mixed hits and misses
+    let mixed_stats = CacheStats {
+        vector_cache_hits: 7,
+        vector_cache_misses: 3,
+        topk_cache_hits: 8,
+        topk_cache_misses: 2,
+        metadata_cache_hits: 6,
+        metadata_cache_misses: 4,
+        gdpr_deletions: 2,
+        gdpr_keys_deleted: 5,
+    };
+    
+    assert!((mixed_stats.vector_hit_ratio() - 0.7).abs() < f64::EPSILON);
+    assert!((mixed_stats.topk_hit_ratio() - 0.8).abs() < f64::EPSILON);
+    assert!((mixed_stats.metadata_hit_ratio() - 0.6).abs() < f64::EPSILON);
+    
+    // Overall: (7+8+6) / (7+8+6+3+2+4) = 21/30 = 0.7
+    assert!((mixed_stats.overall_hit_ratio() - 0.7).abs() < f64::EPSILON);
+    
+    // Test with only hits
+    let hits_only = CacheStats {
+        vector_cache_hits: 10,
+        vector_cache_misses: 0,
+        topk_cache_hits: 5,
+        topk_cache_misses: 0,
+        metadata_cache_hits: 8,
+        metadata_cache_misses: 0,
+        gdpr_deletions: 0,
+        gdpr_keys_deleted: 0,
+    };
+    
+    assert_eq!(hits_only.vector_hit_ratio(), 1.0);
+    assert_eq!(hits_only.topk_hit_ratio(), 1.0);
+    assert_eq!(hits_only.metadata_hit_ratio(), 1.0);
+    assert_eq!(hits_only.overall_hit_ratio(), 1.0);
+}
+
 #[test]
 fn test_cosine_similarity() {
     // Test identical vectors
@@ -392,6 +608,161 @@ async fn test_cache_ttl_behavior() {
         
         // Note: Testing actual TTL expiration would require waiting 60+ seconds
         // In a real test environment, you might use a shorter TTL for testing
+    } else {
+        println!("Skipping Redis-dependent test - Redis not available");
+    }
+}
+
+#[test]
+fn test_query_hash_generation_edge_cases() {
+    // Create a mock cache manager for testing hash generation
+    // We can test the hash generation logic without Redis
+    
+    // Test normalization of different query formats
+    let test_cases = vec![
+        ("hello world", "hello world"),
+        ("  hello world  ", "hello world"),
+        ("Hello World", "hello world"),
+        ("HELLO    WORLD", "hello world"),
+        ("hello\tworld", "hello world"),
+        ("hello\nworld", "hello world"),
+        ("hello\r\nworld", "hello world"),
+        ("  Hello   World  ", "hello world"),
+    ];
+    
+    // All these should produce the same hash after normalization
+    let mut hashes = Vec::new();
+    for (input, expected_normalized) in test_cases {
+        // Simulate the normalization logic from CacheManager::generate_query_hash
+        let normalized = input
+            .to_lowercase()
+            .trim()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        
+        assert_eq!(normalized, expected_normalized);
+        
+        let hash = farmhash::hash64(normalized.as_bytes());
+        hashes.push(hash);
+    }
+    
+    // All hashes should be identical
+    for hash in &hashes[1..] {
+        assert_eq!(*hash, hashes[0]);
+    }
+    
+    // Test that different queries produce different hashes
+    let different_queries = vec![
+        "hello world",
+        "world hello",
+        "hello",
+        "world",
+        "hello world test",
+    ];
+    
+    let mut different_hashes = Vec::new();
+    for query in different_queries {
+        let hash = farmhash::hash64(query.as_bytes());
+        different_hashes.push(hash);
+    }
+    
+    // All hashes should be different
+    for i in 0..different_hashes.len() {
+        for j in (i + 1)..different_hashes.len() {
+            assert_ne!(different_hashes[i], different_hashes[j]);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Redis connection"]
+async fn test_cache_key_patterns() {
+    let config = create_test_redis_config();
+    
+    if let Ok(cache_manager) = CacheManager::new(config).await {
+        // Test various post_id formats to ensure key generation works correctly
+        let test_post_ids = vec![
+            "simple_post_123",
+            "post-with-dashes",
+            "post_with_underscores",
+            "post.with.dots",
+            "post123",
+            "POST_UPPERCASE",
+            "post_with_numbers_456789",
+        ];
+        
+        let test_embedding = vec![0.1, 0.2, 0.3];
+        let test_metadata = create_test_metadata();
+        
+        // Test storing and retrieving with different post_id formats
+        for post_id in &test_post_ids {
+            // Store data
+            assert!(cache_manager.set_vector_cache(post_id, &test_embedding).await.is_ok());
+            assert!(cache_manager.set_metadata_cache(post_id, &test_metadata).await.is_ok());
+            
+            // Retrieve data
+            let vector_result = cache_manager.get_vector_cache(post_id).await;
+            let metadata_result = cache_manager.get_metadata_cache(post_id).await;
+            
+            assert!(vector_result.is_ok());
+            assert!(metadata_result.is_ok());
+            assert!(vector_result.unwrap().is_some());
+            assert!(metadata_result.unwrap().is_some());
+            
+            // Clean up
+            let _ = cache_manager.invalidate_post_data(post_id).await;
+        }
+        
+    } else {
+        println!("Skipping Redis-dependent test - Redis not available");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Redis connection"]
+async fn test_concurrent_cache_operations() {
+    let config = create_test_redis_config();
+    
+    if let Ok(cache_manager) = CacheManager::new(config).await {
+        cache_manager.reset_cache_stats();
+        
+        let cache_manager = Arc::new(cache_manager);
+        let mut handles = Vec::new();
+        
+        // Spawn multiple concurrent operations
+        for i in 0..10 {
+            let cache_manager_clone = Arc::clone(&cache_manager);
+            let handle = tokio::spawn(async move {
+                let post_id = format!("concurrent_post_{}", i);
+                let embedding = vec![i as f32, (i + 1) as f32, (i + 2) as f32];
+                let metadata = create_test_metadata();
+                
+                // Store data
+                let _ = cache_manager_clone.set_vector_cache(&post_id, &embedding).await;
+                let _ = cache_manager_clone.set_metadata_cache(&post_id, &metadata).await;
+                
+                // Retrieve data
+                let _ = cache_manager_clone.get_vector_cache(&post_id).await;
+                let _ = cache_manager_clone.get_metadata_cache(&post_id).await;
+                
+                // Clean up
+                let _ = cache_manager_clone.invalidate_post_data(&post_id).await;
+            });
+            handles.push(handle);
+        }
+        
+        // Wait for all operations to complete
+        for handle in handles {
+            assert!(handle.await.is_ok());
+        }
+        
+        // Verify statistics were updated correctly
+        let stats = cache_manager.get_cache_stats();
+        assert_eq!(stats.vector_cache_hits, 10);
+        assert_eq!(stats.metadata_cache_hits, 10);
+        assert_eq!(stats.gdpr_deletions, 10);
+        
     } else {
         println!("Skipping Redis-dependent test - Redis not available");
     }

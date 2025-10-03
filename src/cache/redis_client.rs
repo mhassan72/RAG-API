@@ -7,6 +7,8 @@ use fred::{
     types::{Builder, Expiration, RedisConfig as FredRedisConfig, InfoKind},
 };
 use serde_json;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
@@ -17,6 +19,44 @@ pub struct RedisClient {
     client: RedisPool,
     /// Configuration
     config: RedisConfig,
+    /// Cache statistics tracking
+    stats: Arc<CacheStatsInternal>,
+}
+
+/// Internal cache statistics with atomic counters for thread safety
+#[derive(Debug, Default)]
+struct CacheStatsInternal {
+    // Vector cache statistics
+    vector_cache_hits: AtomicU64,
+    vector_cache_misses: AtomicU64,
+    
+    // Top-k cache statistics
+    topk_cache_hits: AtomicU64,
+    topk_cache_misses: AtomicU64,
+    
+    // Metadata cache statistics
+    metadata_cache_hits: AtomicU64,
+    metadata_cache_misses: AtomicU64,
+    
+    // GDPR deletion statistics
+    gdpr_deletions: AtomicU64,
+    gdpr_keys_deleted: AtomicU64,
+}
+
+impl CacheStatsInternal {
+    /// Convert to public CacheStats struct
+    fn to_cache_stats(&self) -> CacheStats {
+        CacheStats {
+            vector_cache_hits: self.vector_cache_hits.load(Ordering::Relaxed),
+            vector_cache_misses: self.vector_cache_misses.load(Ordering::Relaxed),
+            topk_cache_hits: self.topk_cache_hits.load(Ordering::Relaxed),
+            topk_cache_misses: self.topk_cache_misses.load(Ordering::Relaxed),
+            metadata_cache_hits: self.metadata_cache_hits.load(Ordering::Relaxed),
+            metadata_cache_misses: self.metadata_cache_misses.load(Ordering::Relaxed),
+            gdpr_deletions: self.gdpr_deletions.load(Ordering::Relaxed),
+            gdpr_keys_deleted: self.gdpr_keys_deleted.load(Ordering::Relaxed),
+        }
+    }
 }
 
 impl RedisClient {
@@ -58,7 +98,11 @@ impl RedisClient {
 
         info!("Redis client connected successfully");
 
-        Ok(RedisClient { client, config })
+        Ok(RedisClient { 
+            client, 
+            config,
+            stats: Arc::new(CacheStatsInternal::default()),
+        })
     }
 
     /// Store vector embedding in Redis with permanent storage
@@ -94,6 +138,9 @@ impl RedisClient {
 
         match result {
             Some(bytes) => {
+                // Track cache hit
+                self.stats.vector_cache_hits.fetch_add(1, Ordering::Relaxed);
+                
                 // Deserialize bytes back to f32 vector
                 if bytes.len() % 4 != 0 {
                     return Err(SearchError::RedisError(
@@ -106,11 +153,13 @@ impl RedisClient {
                     .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect();
 
-                debug!("Retrieved vector for post_id: {} (dimensions: {})", post_id, embedding.len());
+                debug!("Retrieved vector for post_id: {} (dimensions: {}) - CACHE HIT", post_id, embedding.len());
                 Ok(Some(embedding))
             }
             None => {
-                debug!("No vector found for post_id: {}", post_id);
+                // Track cache miss
+                self.stats.vector_cache_misses.fetch_add(1, Ordering::Relaxed);
+                debug!("No vector found for post_id: {} - CACHE MISS", post_id);
                 Ok(None)
             }
         }
@@ -205,14 +254,19 @@ impl RedisClient {
 
         match result {
             Some(serialized) => {
+                // Track cache hit
+                self.stats.topk_cache_hits.fetch_add(1, Ordering::Relaxed);
+                
                 let results: Vec<CachedResult> = serde_json::from_str(&serialized)
                     .map_err(|e| SearchError::CacheError(format!("Failed to deserialize cached results: {}", e)))?;
                 
-                debug!("Retrieved {} cached results for query_hash: {}", results.len(), query_hash);
+                debug!("Retrieved {} cached results for query_hash: {} - CACHE HIT", results.len(), query_hash);
                 Ok(Some(results))
             }
             None => {
-                debug!("No cached results found for query_hash: {}", query_hash);
+                // Track cache miss
+                self.stats.topk_cache_misses.fetch_add(1, Ordering::Relaxed);
+                debug!("No cached results found for query_hash: {} - CACHE MISS", query_hash);
                 Ok(None)
             }
         }
@@ -249,14 +303,19 @@ impl RedisClient {
 
         match result {
             Some(serialized) => {
+                // Track cache hit
+                self.stats.metadata_cache_hits.fetch_add(1, Ordering::Relaxed);
+                
                 let metadata: PostMetadata = serde_json::from_str(&serialized)
                     .map_err(|e| SearchError::CacheError(format!("Failed to deserialize metadata: {}", e)))?;
                 
-                debug!("Retrieved cached metadata for post_id: {}", post_id);
+                debug!("Retrieved cached metadata for post_id: {} - CACHE HIT", post_id);
                 Ok(Some(metadata))
             }
             None => {
-                debug!("No cached metadata found for post_id: {}", post_id);
+                // Track cache miss
+                self.stats.metadata_cache_misses.fetch_add(1, Ordering::Relaxed);
+                debug!("No cached metadata found for post_id: {} - CACHE MISS", post_id);
                 Ok(None)
             }
         }
@@ -277,7 +336,11 @@ impl RedisClient {
             .await
             .map_err(|e| SearchError::RedisError(format!("Failed to delete post data: {}", e)))?;
 
-        info!("Deleted {} cache entries for post_id: {}", deleted_count, post_id);
+        // Track GDPR deletion statistics
+        self.stats.gdpr_deletions.fetch_add(1, Ordering::Relaxed);
+        self.stats.gdpr_keys_deleted.fetch_add(deleted_count as u64, Ordering::Relaxed);
+
+        info!("Deleted {} cache entries for post_id: {} (GDPR compliance)", deleted_count, post_id);
         Ok(())
     }
 
@@ -341,6 +404,23 @@ impl RedisClient {
 
         Ok(stats)
     }
+
+    /// Get cache hit/miss statistics
+    pub fn get_cache_stats(&self) -> CacheStats {
+        self.stats.to_cache_stats()
+    }
+
+    /// Reset cache statistics (useful for testing)
+    pub fn reset_cache_stats(&self) {
+        self.stats.vector_cache_hits.store(0, Ordering::Relaxed);
+        self.stats.vector_cache_misses.store(0, Ordering::Relaxed);
+        self.stats.topk_cache_hits.store(0, Ordering::Relaxed);
+        self.stats.topk_cache_misses.store(0, Ordering::Relaxed);
+        self.stats.metadata_cache_hits.store(0, Ordering::Relaxed);
+        self.stats.metadata_cache_misses.store(0, Ordering::Relaxed);
+        self.stats.gdpr_deletions.store(0, Ordering::Relaxed);
+        self.stats.gdpr_keys_deleted.store(0, Ordering::Relaxed);
+    }
 }
 
 /// Redis connection statistics
@@ -350,6 +430,71 @@ pub struct RedisStats {
     pub total_connections: u64,
     pub connected_clients: u32,
     pub used_memory_bytes: u64,
+}
+
+/// Cache statistics for monitoring hit/miss ratios
+#[derive(Debug, Default, Clone)]
+pub struct CacheStats {
+    // Vector cache statistics
+    pub vector_cache_hits: u64,
+    pub vector_cache_misses: u64,
+    
+    // Top-k cache statistics
+    pub topk_cache_hits: u64,
+    pub topk_cache_misses: u64,
+    
+    // Metadata cache statistics
+    pub metadata_cache_hits: u64,
+    pub metadata_cache_misses: u64,
+    
+    // GDPR deletion statistics
+    pub gdpr_deletions: u64,
+    pub gdpr_keys_deleted: u64,
+}
+
+impl CacheStats {
+    /// Calculate vector cache hit ratio
+    pub fn vector_hit_ratio(&self) -> f64 {
+        let total = self.vector_cache_hits + self.vector_cache_misses;
+        if total == 0 {
+            0.0
+        } else {
+            self.vector_cache_hits as f64 / total as f64
+        }
+    }
+    
+    /// Calculate top-k cache hit ratio
+    pub fn topk_hit_ratio(&self) -> f64 {
+        let total = self.topk_cache_hits + self.topk_cache_misses;
+        if total == 0 {
+            0.0
+        } else {
+            self.topk_cache_hits as f64 / total as f64
+        }
+    }
+    
+    /// Calculate metadata cache hit ratio
+    pub fn metadata_hit_ratio(&self) -> f64 {
+        let total = self.metadata_cache_hits + self.metadata_cache_misses;
+        if total == 0 {
+            0.0
+        } else {
+            self.metadata_cache_hits as f64 / total as f64
+        }
+    }
+    
+    /// Calculate overall cache hit ratio
+    pub fn overall_hit_ratio(&self) -> f64 {
+        let total_hits = self.vector_cache_hits + self.topk_cache_hits + self.metadata_cache_hits;
+        let total_misses = self.vector_cache_misses + self.topk_cache_misses + self.metadata_cache_misses;
+        let total = total_hits + total_misses;
+        
+        if total == 0 {
+            0.0
+        } else {
+            total_hits as f64 / total as f64
+        }
+    }
 }
 
 /// Calculate cosine similarity between two vectors

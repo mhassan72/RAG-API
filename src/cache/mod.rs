@@ -1,9 +1,55 @@
 /// Caching module
 /// 
-/// This module implements the three-tier caching strategy:
-/// - Vector cache (permanent LRU)
-/// - Top-k cache (60s TTL)
-/// - Metadata cache (24h TTL)
+/// This module implements a comprehensive three-tier caching strategy for the RAG Search API:
+/// 
+/// ## Three-Tier Cache Architecture
+/// 
+/// ### 1. Vector Cache (Permanent LRU)
+/// - **Purpose**: Store post embeddings to avoid recomputation
+/// - **Key Pattern**: `search:vec:<post_id>`
+/// - **TTL**: Permanent (LRU eviction when memory limit reached)
+/// - **Data**: 384-dimensional f32 vectors stored as binary data
+/// 
+/// ### 2. Top-K Cache (60s TTL)
+/// - **Purpose**: Cache complete search results for identical queries
+/// - **Key Pattern**: `search:topk:<query_hash>` (farmhash64 of normalized query)
+/// - **TTL**: 60 seconds
+/// - **Data**: Serialized JSON array of CachedResult structs
+/// 
+/// ### 3. Metadata Cache (24h TTL)
+/// - **Purpose**: Cache post metadata to avoid database lookups
+/// - **Key Pattern**: `search:meta:<post_id>`
+/// - **TTL**: 24 hours
+/// - **Data**: Serialized JSON PostMetadata structs
+/// 
+/// ## Cache Statistics and Monitoring
+/// 
+/// The cache system provides comprehensive hit/miss tracking:
+/// - Per-cache-tier hit/miss ratios
+/// - Overall cache performance metrics
+/// - GDPR deletion tracking
+/// - Thread-safe atomic counters for concurrent access
+/// 
+/// ## GDPR Compliance
+/// 
+/// The cache supports GDPR "right to be forgotten" through:
+/// - `invalidate_post_data()` method for complete data deletion
+/// - Audit logging of deletion operations
+/// - Non-blocking UNLINK operations for performance
+/// 
+/// ## Query Normalization
+/// 
+/// Query hashing includes normalization to improve cache hit rates:
+/// - Lowercase conversion
+/// - Whitespace trimming and normalization
+/// - Consistent hash generation using farmhash64
+/// 
+/// ## Performance Characteristics
+/// 
+/// - **Vector Cache**: O(1) lookup, permanent storage with LRU eviction
+/// - **Top-K Cache**: O(1) lookup, 60s TTL for query result caching
+/// - **Metadata Cache**: O(1) lookup, 24h TTL for metadata caching
+/// - **Statistics**: Thread-safe atomic operations with minimal overhead
 
 mod redis_client;
 
@@ -19,7 +65,7 @@ use redis_client::RedisClient;
 use std::sync::Arc;
 use tracing::{debug, info};
 
-pub use redis_client::{RedisStats};
+pub use redis_client::{RedisStats, CacheStats};
 
 /// Cache manager for the three-tier caching strategy
 pub struct CacheManager {
@@ -114,5 +160,15 @@ impl CacheManager {
     /// Check Redis connection health
     pub async fn health_check(&self) -> SearchResult<()> {
         self.redis_client.health_check().await
+    }
+
+    /// Get cache hit/miss statistics
+    pub fn get_cache_stats(&self) -> CacheStats {
+        self.redis_client.get_cache_stats()
+    }
+
+    /// Reset cache statistics (useful for testing and monitoring)
+    pub fn reset_cache_stats(&self) {
+        self.redis_client.reset_cache_stats()
     }
 }
