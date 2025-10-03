@@ -15,7 +15,10 @@ pub use ml::TokenizerService;
 pub use cache::CacheManager;
 pub use database::DatabaseManager;
 pub use search::{
+    VectorSearchService, SearchStats,
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState,
     RetryExecutor, RetryConfig, RetryStrategy,
-    FallbackSearchService, FallbackHealthStatus
+    FallbackSearchService, FallbackHealthStatus,
+    RerankingService, RerankingConfig,
+    SearchService, SearchServiceHealth, SearchServiceStats
 };

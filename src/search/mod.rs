@@ -6,6 +6,8 @@
 pub mod circuit_breaker;
 pub mod retry;
 pub mod fallback;
+pub mod reranking;
+pub mod service;
 
 #[cfg(test)]
 mod tests;
@@ -14,6 +16,8 @@ mod tests;
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState};
 pub use retry::{RetryExecutor, RetryConfig, RetryStrategy};
 pub use fallback::{FallbackSearchService, FallbackHealthStatus};
+pub use reranking::{RerankingService, RerankingConfig};
+pub use service::{SearchService, SearchServiceHealth, SearchServiceStats};
 
 use crate::cache::CacheManager;
 use crate::database::DatabaseManager;

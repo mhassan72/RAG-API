@@ -5,6 +5,7 @@ use tracing::{debug, instrument};
 
 /// CrossEncoder service for reranking search results
 /// Uses ms-marco-MiniLM-L-6-v2 ONNX model to score query-document pairs
+#[derive(Clone)]
 pub struct CrossEncoder {
     model_path: PathBuf,
     tokenizer: TokenizerService,

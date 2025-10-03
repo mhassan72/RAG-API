@@ -15,6 +15,8 @@ use tracing::{info, error, warn};
 use crate::error::{SearchError, SearchResult};
 use crate::types::{SearchRequest, SearchResponse};
 use crate::config::Config;
+use crate::cache::CacheManager;
+use crate::database::DatabaseManager;
 
 /// Main search server structure
 pub struct SearchServer {
@@ -29,7 +31,8 @@ pub struct AppState {
     pub config: Config,
     /// Rate limiter for tracking requests per IP
     rate_limiter: Arc<RateLimiter>,
-    // TODO: Add ML service, cache manager, etc. in future tasks
+    /// Complete search service with ML integration
+    search_service: Arc<crate::search::SearchService>,
 }
 
 /// Simple in-memory rate limiter
@@ -67,8 +70,29 @@ impl RateLimiter {
 impl SearchServer {
     /// Create a new search server instance
     pub async fn new(config: Config) -> SearchResult<Self> {
+        info!("Initializing search server components...");
+
+        // Initialize cache manager
+        let cache_manager = Arc::new(CacheManager::new(config.redis.clone()).await?);
+        
+        // Initialize database manager
+        let database_manager = Arc::new(DatabaseManager::new(config.database.clone()).await?);
+        
+        // Initialize ML service
+        let ml_service = Arc::new(crate::ml::MLService::new().await?);
+        
+        // Initialize complete search service
+        let search_service = Arc::new(
+            crate::search::SearchService::new(
+                cache_manager,
+                database_manager,
+                ml_service,
+            ).await?
+        );
+
         let state = Arc::new(AppState {
             rate_limiter: Arc::new(RateLimiter::new(config.server.rate_limit_per_minute)),
+            search_service,
             config: config.clone(),
         });
 
@@ -78,6 +102,7 @@ impl SearchServer {
             .layer(middleware::from_fn_with_state(state.clone(), request_middleware))
             .with_state(state);
 
+        info!("Search server initialized successfully");
         Ok(SearchServer { app, config })
     }
 
@@ -134,7 +159,7 @@ async fn request_middleware(
 
 /// Handler for semantic search endpoint
 async fn semantic_search_handler(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<Vec<SearchResponse>>, (StatusCode, Json<ErrorResponse>)> {
@@ -156,12 +181,12 @@ async fn semantic_search_handler(
     if let Some(content_length) = headers.get("content-length") {
         if let Ok(length_str) = content_length.to_str() {
             if let Ok(length) = length_str.parse::<usize>() {
-                if length > _state.config.server.max_request_size {
+                if length > state.config.server.max_request_size {
                     return Err((
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse {
                             error: "Request too large".to_string(),
-                            message: format!("Request body must be less than {} bytes", _state.config.server.max_request_size),
+                            message: format!("Request body must be less than {} bytes", state.config.server.max_request_size),
                         }),
                     ));
                 }
@@ -181,17 +206,64 @@ async fn semantic_search_handler(
         ));
     }
 
-    info!("Processing search request for query: '{}'", request.query);
+    info!("Processing search request for query: '{}' (rerank: {})", request.query, request.rerank);
 
-    // TODO: Implement actual search logic in future tasks
-    // For now, return empty results
-    Ok(Json(vec![]))
+    // Perform semantic search with optional reranking
+    match state.search_service.semantic_search(request).await {
+        Ok(results) => {
+            info!("Search completed successfully: {} results", results.len());
+            Ok(Json(results))
+        }
+        Err(e) => {
+            error!("Search failed: {}", e);
+            
+            // Map different error types to appropriate HTTP status codes
+            let (status_code, error_message) = match &e {
+                SearchError::ModelError(_) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "ML service temporarily unavailable".to_string()
+                ),
+                SearchError::RedisError(_) | SearchError::DatabaseError(_) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Search service temporarily unavailable".to_string()
+                ),
+                SearchError::ConfigError(_) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Configuration error".to_string()
+                ),
+                SearchError::Internal(_) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string()
+                ),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Unexpected error".to_string()
+                ),
+            };
+
+            Err((
+                status_code,
+                Json(ErrorResponse {
+                    error: "Search failed".to_string(),
+                    message: error_message,
+                }),
+            ))
+        }
+    }
 }
 
 /// Handler for health check endpoint
-async fn health_handler() -> Json<HealthResponse> {
+async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+    // Perform comprehensive health check
+    let search_health = state.search_service.health_check().await;
+    
+    let status = match search_health {
+        Ok(_) => "healthy".to_string(),
+        Err(_) => "degraded".to_string(),
+    };
+
     Json(HealthResponse {
-        status: "healthy".to_string(),
+        status,
         timestamp: chrono::Utc::now(),
     })
 }

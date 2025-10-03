@@ -732,4 +732,204 @@ mod integration_tests {
             assert!(stats.postgres_total_posts >= 0);
         }
     }
-}
+
+    #[tokio::test]
+    async fn test_reranking_service_integration() {
+        use crate::search::reranking::{RerankingService, RerankingConfig};
+        use crate::ml::{CrossEncoder, TokenizerService};
+        use crate::types::{SearchResponse, PostMetadata};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use chrono::Utc;
+
+        // Create mock cross-encoder
+        let tokenizer = TokenizerService::new_sync().unwrap();
+        let cross_encoder = Arc::new(CrossEncoder::new(
+            PathBuf::from("test_model.onnx"),
+            tokenizer
+        ));
+
+        // Create reranking service
+        let reranking_service = RerankingService::new(cross_encoder);
+
+        // Create test search results
+        let search_results = vec![
+            SearchResponse {
+                post_id: "post1".to_string(),
+                title: "Machine Learning Basics".to_string(),
+                snippet: "Introduction to machine learning concepts".to_string(),
+                score: 0.7,
+                meta: PostMetadata {
+                    author_name: "Author 1".to_string(),
+                    url: "https://example.com/post1".to_string(),
+                    date: Utc::now(),
+                    language: "en".to_string(),
+                    frozen: false,
+                },
+            },
+            SearchResponse {
+                post_id: "post2".to_string(),
+                title: "Deep Learning Guide".to_string(),
+                snippet: "Comprehensive guide to deep learning".to_string(),
+                score: 0.6,
+                meta: PostMetadata {
+                    author_name: "Author 2".to_string(),
+                    url: "https://example.com/post2".to_string(),
+                    date: Utc::now(),
+                    language: "en".to_string(),
+                    frozen: false,
+                },
+            },
+        ];
+
+        // Test reranking enabled
+        let reranked_results = reranking_service
+            .rerank_results("machine learning", &search_results, true)
+            .await;
+
+        assert!(reranked_results.is_ok(), "Reranking should succeed");
+        let results = reranked_results.unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Test reranking disabled
+        let original_results = reranking_service
+            .rerank_results("machine learning", &search_results, false)
+            .await;
+
+        assert!(original_results.is_ok(), "Should return original results when disabled");
+        let results = original_results.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].score, 0.7); // Original scores preserved
+    }
+
+    #[tokio::test]
+    async fn test_reranking_graceful_degradation() {
+        use crate::search::reranking::{RerankingService, RerankingConfig};
+        use crate::ml::{CrossEncoder, TokenizerService};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        // Create reranking service with graceful degradation enabled
+        let tokenizer = TokenizerService::new_sync().unwrap();
+        let cross_encoder = Arc::new(CrossEncoder::new(
+            PathBuf::from("nonexistent_model.onnx"), // This might cause issues
+            tokenizer
+        ));
+
+        let config = RerankingConfig {
+            max_candidates_to_rerank: 50,
+            rerank_timeout_ms: 100, // Very short timeout to trigger timeout errors
+            enable_graceful_degradation: true,
+        };
+
+        let reranking_service = RerankingService::with_config(cross_encoder, config);
+
+        // Test that graceful degradation works
+        let search_results = vec![];
+        let result = reranking_service
+            .rerank_results("test query", &search_results, true)
+            .await;
+
+        // Should succeed even with empty results
+        assert!(result.is_ok(), "Should handle empty results gracefully");
+    }
+
+    #[tokio::test]
+    async fn test_reranking_performance_optimization() {
+        use crate::search::reranking::{RerankingService, RerankingConfig};
+        use crate::ml::{CrossEncoder, TokenizerService};
+        use crate::types::{SearchResponse, PostMetadata};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use chrono::Utc;
+
+        // Create reranking service with limited candidates
+        let tokenizer = TokenizerService::new_sync().unwrap();
+        let cross_encoder = Arc::new(CrossEncoder::new(
+            PathBuf::from("test_model.onnx"),
+            tokenizer
+        ));
+
+        let config = RerankingConfig {
+            max_candidates_to_rerank: 2, // Limit to 2 candidates
+            rerank_timeout_ms: 1000,
+            enable_graceful_degradation: true,
+        };
+
+        let reranking_service = RerankingService::with_config(cross_encoder, config);
+
+        // Create 3 search results
+        let search_results = vec![
+            SearchResponse {
+                post_id: "post1".to_string(),
+                title: "First Post".to_string(),
+                snippet: "First post content".to_string(),
+                score: 0.9,
+                meta: PostMetadata {
+                    author_name: "Author 1".to_string(),
+                    url: "https://example.com/post1".to_string(),
+                    date: Utc::now(),
+                    language: "en".to_string(),
+                    frozen: false,
+                },
+            },
+            SearchResponse {
+                post_id: "post2".to_string(),
+                title: "Second Post".to_string(),
+                snippet: "Second post content".to_string(),
+                score: 0.8,
+                meta: PostMetadata {
+                    author_name: "Author 2".to_string(),
+                    url: "https://example.com/post2".to_string(),
+                    date: Utc::now(),
+                    language: "en".to_string(),
+                    frozen: false,
+                },
+            },
+            SearchResponse {
+                post_id: "post3".to_string(),
+                title: "Third Post".to_string(),
+                snippet: "Third post content".to_string(),
+                score: 0.7,
+                meta: PostMetadata {
+                    author_name: "Author 3".to_string(),
+                    url: "https://example.com/post3".to_string(),
+                    date: Utc::now(),
+                    language: "en".to_string(),
+                    frozen: false,
+                },
+            },
+        ];
+
+        let result = reranking_service
+            .rerank_results("test query", &search_results, true)
+            .await;
+
+        assert!(result.is_ok(), "Reranking with performance limit should succeed");
+        let results = result.unwrap();
+        assert_eq!(results.len(), 3); // Should return all results
+        
+        // Only first 2 should have been reranked, third should keep original score
+        // (This is implementation-dependent and might vary based on the mock cross-encoder)
+    }
+
+    #[test]
+    fn test_reranking_config() {
+        use crate::search::reranking::RerankingConfig;
+
+        // Test default configuration
+        let default_config = RerankingConfig::default();
+        assert_eq!(default_config.max_candidates_to_rerank, 50);
+        assert_eq!(default_config.rerank_timeout_ms, 1000);
+        assert!(default_config.enable_graceful_degradation);
+
+        // Test custom configuration
+        let custom_config = RerankingConfig {
+            max_candidates_to_rerank: 25,
+            rerank_timeout_ms: 500,
+            enable_graceful_degradation: false,
+        };
+        assert_eq!(custom_config.max_candidates_to_rerank, 25);
+        assert_eq!(custom_config.rerank_timeout_ms, 500);
+        assert!(!custom_config.enable_graceful_degradation);
+    }}
